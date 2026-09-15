@@ -1,0 +1,276 @@
+name: ${OMNIFLOW_PROJECT_NAME:-omniflow}
+
+x-database-environment: &database-environment
+  POSTGRES_DB: ${POSTGRES_DB:-omniflow}
+  POSTGRES_USER: ${DATABASE_ADMIN_USER:-omniflow_admin}
+  POSTGRES_PASSWORD_FILE: /run/omniflow-admin/admin_password
+
+x-api-environment: &api-environment
+  # Pass database credentials as discrete fields so reserved characters in a
+  # password are never misparsed as URI delimiters.
+  DATABASE_HOST: database
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: ${POSTGRES_DB:-omniflow}
+  DATABASE_USER: ${DATABASE_RUNTIME_USER:-omniflow_api}
+  DATABASE_PASSWORD_FILE: /run/omniflow-api/database_password
+  DATABASE_RUNTIME_PASSWORD_FILE: /run/omniflow-api/database_password
+  AI_SERVICE_SECRET_FILE: /run/omniflow-api/ai_service_secret
+  OPERATOR_PASSWORD_FILE: /run/omniflow-api/operator_password
+
+x-ai-environment: &ai-environment
+  DATABASE_HOST: database
+  DATABASE_PORT: "5432"
+  DATABASE_NAME: ${POSTGRES_DB:-omniflow}
+  DATABASE_USER: ${AI_RUNTIME_USER:-omniflow_ai}
+  DATABASE_PASSWORD_FILE: /run/omniflow-ai/database_password
+  AI_RUNTIME_PASSWORD_FILE: /run/omniflow-ai/database_password
+  AI_SERVICE_SECRET_FILE: /run/omniflow-ai/ai_service_secret
+
+services:
+  secrets-init:
+    image: alpine:3.21
+    environment:
+      ADMIN_PASSWORD_INPUT: ${POSTGRES_PASSWORD:-}
+      API_PASSWORD_INPUT: ${DATABASE_RUNTIME_PASSWORD:-}
+      AI_PASSWORD_INPUT: ${AI_RUNTIME_PASSWORD:-}
+      AI_SERVICE_SECRET_INPUT: ${AI_SERVICE_SECRET:-}
+      OPERATOR_PASSWORD_INPUT: ${OPERATOR_PASSWORD:-}
+    volumes:
+      - admin-secrets:/run/omniflow-admin
+      - api-secrets:/run/omniflow-api
+      - ai-secrets:/run/omniflow-ai
+      - ./scripts/init_secrets.sh:/opt/omniflow/init_secrets.sh:ro
+    entrypoint: ["/bin/sh", "/opt/omniflow/init_secrets.sh"]
+    restart: "no"
+
+  database:
+    image: pgvector/pgvector:pg16
+    environment: *database-environment
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - postgres-socket:/var/run/postgresql
+      - admin-secrets:/run/omniflow-admin:ro
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # pg_isready reports success even for a nonexistent role. Prove that the
+      # configured identity can execute SQL against the configured database.
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD="$$(cat "$${POSTGRES_PASSWORD_FILE}")"
+          psql -qAt -h database -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+          -c 'SELECT 1' | grep -qx 1
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+
+  database-init:
+    build:
+      context: .
+      dockerfile: migrator/Dockerfile
+    environment:
+      DATABASE_HOST: database
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: ${POSTGRES_DB:-omniflow}
+      DATABASE_USER: ${DATABASE_ADMIN_USER:-omniflow_admin}
+      DATABASE_PASSWORD_FILE: /run/omniflow-admin/admin_password
+      DATABASE_RUNTIME_PASSWORD_FILE: /run/omniflow-api/database_password
+      AI_RUNTIME_PASSWORD_FILE: /run/omniflow-ai/database_password
+      DATABASE_RUNTIME_USER: ${DATABASE_RUNTIME_USER:-omniflow_api}
+      AI_RUNTIME_USER: ${AI_RUNTIME_USER:-omniflow_ai}
+      DATABASE_ADMIN_SOCKET: /var/run/postgresql
+      DATABASE_ADMIN_USER: ${DATABASE_ADMIN_USER:-}
+      DATABASE_LEGACY_SUPERUSER: ${DATABASE_LEGACY_SUPERUSER:-}
+      DATABASE_CONNECT_ATTEMPTS: ${DATABASE_CONNECT_ATTEMPTS:-30}
+      DATABASE_CONNECT_RETRY_SECONDS: ${DATABASE_CONNECT_RETRY_SECONDS:-1}
+      DATABASE_MIGRATION_LOCK_FILE: /var/run/postgresql/.omniflow-migration.lock
+    volumes:
+      - postgres-socket:/var/run/postgresql
+      - admin-secrets:/run/omniflow-admin:ro
+      - api-secrets:/run/omniflow-api:ro
+      - ai-secrets:/run/omniflow-ai:ro
+    depends_on:
+      secrets-init:
+        condition: service_completed_successfully
+      database:
+        # The migrator must be able to repair credential drift before the
+        # authenticated database healthcheck can become healthy.
+        condition: service_started
+    restart: "on-failure:5"
+
+  database-check:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: migrator/Dockerfile
+    environment:
+      DATABASE_HOST: database
+      DATABASE_PORT: "5432"
+      DATABASE_NAME: ${POSTGRES_DB:-omniflow}
+      DATABASE_USER: ${DATABASE_RUNTIME_USER:-omniflow_api}
+      DATABASE_PASSWORD_FILE: /run/omniflow-api/database_password
+    volumes:
+      - api-secrets:/run/omniflow-api:ro
+    depends_on:
+      database-init:
+        condition: service_completed_successfully
+    command: ["python", "scripts/check_constraints.py"]
+    restart: "no"
+
+  database-tests:
+    profiles: ["tools"]
+    build:
+      context: ./api
+    environment:
+      <<: *api-environment
+      RUN_DB_TESTS: "1"
+    working_dir: /workspace
+    volumes:
+      - admin-secrets:/run/omniflow-admin:ro
+      - api-secrets:/run/omniflow-api:ro
+      - ai-secrets:/run/omniflow-ai:ro
+      - ./api:/workspace/api:ro
+      - ./ai:/workspace/ai:ro
+      - ./alembic:/workspace/alembic:ro
+      - ./tests:/workspace/tests:ro
+    depends_on:
+      database-init:
+        condition: service_completed_successfully
+    command:
+      - python
+      - -m
+      - unittest
+      - tests.test_ai_actions.AIActionIntegrationTests
+      - tests.test_backups.BackupIntegrationTests
+      - tests.test_public_routes.PublicMutationIntegrationTests
+      - tests.test_migrations.SchemaConstraintIntegrationTests
+      - tests.test_ai_classifier.RetrievalIntegrationTests
+      - -v
+    restart: "no"
+
+  showcase-seed:
+    profiles: ["tools"]
+    # Reuse the API runtime that the normal Compose build already produces;
+    # the seeder itself is stdlib-only and mounted read-only below.
+    image: omniflow-api:latest
+    environment:
+      SHOWCASE_BASE_URL: http://api:8000/api
+    volumes:
+      - ./scripts/seed_showcase.py:/opt/omniflow/seed_showcase.py:ro
+    depends_on:
+      api:
+        condition: service_healthy
+    command: ["python", "/opt/omniflow/seed_showcase.py"]
+    restart: "no"
+
+  model:
+    image: ollama/ollama:0.32.4
+    environment:
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+    volumes:
+      - ollama-models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  model-init:
+    image: ollama/ollama:0.32.4
+    environment:
+      OLLAMA_HOST: http://model:11434
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-bge-m3}
+      OLLAMA_REASONER_MODEL: ${OLLAMA_REASONER_MODEL:-qwen3:8b}
+      MODEL_PULL_ATTEMPTS: ${MODEL_PULL_ATTEMPTS:-5}
+      MODEL_PULL_TIMEOUT_SECONDS: ${MODEL_PULL_TIMEOUT_SECONDS:-3600}
+    depends_on:
+      model:
+        condition: service_healthy
+    volumes:
+      - ./scripts/init_models.sh:/opt/omniflow/init_models.sh:ro
+    entrypoint: ["/bin/sh", "/opt/omniflow/init_models.sh"]
+    restart: "on-failure:3"
+
+  api:
+    build:
+      context: ./api
+    environment:
+      <<: *api-environment
+      AI_SERVICE_URL: http://ai:8090
+      DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-2}
+      DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-10}
+      DB_COMMAND_TIMEOUT: ${DB_COMMAND_TIMEOUT:-30}
+      OMNIFLOW_ALLOWED_HOSTS: ${OMNIFLOW_ALLOWED_HOSTS:-localhost,127.0.0.1,testserver,api}
+      OMNIFLOW_SESSION_COOKIE_SECURE: ${OMNIFLOW_SESSION_COOKIE_SECURE:-false}
+    volumes:
+      - api-secrets:/run/omniflow-api:ro
+    depends_on:
+      database-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  ai:
+    build:
+      context: ./ai
+    environment:
+      <<: *ai-environment
+      API_INTERNAL_URL: http://api:8000
+      OLLAMA_URL: http://model:11434
+      OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-bge-m3}
+      OLLAMA_REASONER_MODEL: ${OLLAMA_REASONER_MODEL:-qwen3:8b}
+      INDEX_VERSION: ${INDEX_VERSION:-2}
+      RETRIEVAL_LIMIT: ${RETRIEVAL_LIMIT:-8}
+      MAX_SEMANTIC_DISTANCE: ${MAX_SEMANTIC_DISTANCE:-0.60}
+      INDEX_SYNC_INTERVAL_SECONDS: ${INDEX_SYNC_INTERVAL_SECONDS:-60}
+      AUTO_REINDEX: ${AUTO_REINDEX:-true}
+    volumes:
+      - ai-secrets:/run/omniflow-ai:ro
+    depends_on:
+      api:
+        condition: service_healthy
+      model-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=5)"
+      interval: 15s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${OMNIFLOW_BIND_ADDRESS:-127.0.0.1}:${OMNIFLOW_PORT:-3001}:80"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  postgres-socket:
+  admin-secrets:
+  api-secrets:
+  ai-secrets:
+  ollama-models:

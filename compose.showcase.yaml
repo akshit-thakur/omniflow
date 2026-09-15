@@ -1,0 +1,50 @@
+# Isolated demo stack. Reuses the working-stack service graph, keeps
+# PostgreSQL/secrets/index in showcase-only volumes, and reuses a named local
+# Ollama cache so the large models do not need to be pulled for every demo.
+# The project name is fixed so a copied .env cannot collapse this stack
+# onto the working project's volumes.
+name: omniflow-showcase
+
+include:
+  - path: compose.yaml
+
+services:
+  frontend:
+    ports: !override
+      - "${OMNIFLOW_BIND_ADDRESS:-127.0.0.1}:${OMNIFLOW_PORT:-3002}:80"
+
+  model:
+    environment:
+      # The embedding model and reasoner are used sequentially. Keeping one
+      # runner loaded prevents Docker Desktop's VM from overcommitting memory.
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_NUM_PARALLEL: "1"
+    volumes:
+      - showcase-model-cache:/root/.ollama
+
+  model-init:
+    environment:
+      OLLAMA_REASONER_MODEL: ${OMNIFLOW_DEMO_REASONER_MODEL:-qwen3:4b-instruct-2507-q4_K_M}
+
+  ai:
+    environment:
+      OLLAMA_REASONER_MODEL: ${OMNIFLOW_DEMO_REASONER_MODEL:-qwen3:4b-instruct-2507-q4_K_M}
+
+  showcase-seed:
+    environment:
+      SHOWCASE_BASE_URL: http://api:8000/api
+      SHOWCASE_AI_URL: http://ai:8090
+      AI_SERVICE_SECRET_FILE: /run/omniflow-ai/ai_service_secret
+      OPERATOR_PASSWORD_FILE: /run/omniflow-api/operator_password
+    volumes:
+      - api-secrets:/run/omniflow-api:ro
+      - ai-secrets:/run/omniflow-ai:ro
+      - ./scripts/seed_showcase.py:/opt/omniflow/seed_showcase.py:ro
+    depends_on:
+      ai:
+        condition: service_healthy
+
+volumes:
+  showcase-model-cache:
+    external: true
+    name: ${SHOWCASE_OLLAMA_MODELS_VOLUME:-omniflow_ollama-models}
