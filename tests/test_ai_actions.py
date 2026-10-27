@@ -123,6 +123,7 @@ class ApprovalWorkflowTests(unittest.IsolatedAsyncioTestCase):
             }
         )
         conn.executemany = AsyncMock()
+        conn.execute = AsyncMock()
 
         @asynccontextmanager
         async def fake_connection():

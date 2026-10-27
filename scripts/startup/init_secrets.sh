@@ -2,7 +2,7 @@
 set -eu
 
 # Compose-owned secrets live beside the data volumes so a missing or copied
-# .env file cannot silently change credentials for an existing installation.
+# Environment changes cannot silently change credentials for an existing installation.
 # Values are never printed.
 mkdir -p /run/omniflow-admin /run/omniflow-api /run/omniflow-ai
 chmod 0700 /run/omniflow-admin /run/omniflow-api /run/omniflow-ai
@@ -77,12 +77,9 @@ else
     cp "$service_secret_file" "$other_service_secret_file"
     chmod 0400 "$other_service_secret_file"
 fi
-install_secret operator_password "${OPERATOR_PASSWORD_INPUT:-}" 16 /run/omniflow-api
-
 test -s /run/omniflow-admin/admin_password
 test -s /run/omniflow-api/database_password
 test -s /run/omniflow-api/ai_service_secret
-test -s /run/omniflow-api/operator_password
 test -s /run/omniflow-ai/database_password
 test -s /run/omniflow-ai/ai_service_secret
 chown 10001:10001 /run/omniflow-api/*

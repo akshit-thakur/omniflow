@@ -1,4 +1,4 @@
-"""Operator diagnostic: report CHECK constraints left NOT VALID by init.sql.
+"""Docker diagnostic: report CHECK constraints left NOT VALID by init.sql.
 
 database/init.sql adds domain CHECK constraints to legacy tables as NOT VALID
 so they protect new writes immediately, then tries to VALIDATE each one. A
@@ -15,7 +15,7 @@ import sys
 
 from sqlalchemy import text
 
-from run_migrations import build_database_url, create_engine
+from scripts.startup.run_migrations import build_database_url, create_engine
 
 
 def find_invalid_check_constraints(engine) -> list[tuple[str, str, str]]:

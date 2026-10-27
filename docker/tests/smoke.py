@@ -7,8 +7,6 @@ from dataclasses import dataclass
 import json
 import math
 import os
-from pathlib import Path
-import re
 import sys
 from typing import Any, Callable, Mapping, Sequence
 from urllib.error import HTTPError, URLError
@@ -17,7 +15,6 @@ from urllib.request import Request, urlopen
 from uuid import uuid4
 
 
-ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PORT = 3001
 DEFAULT_TIMEOUT = 10.0
 
@@ -46,59 +43,22 @@ class RuntimeConfig:
     base_url: str
 
 
-def _read_env_file(path: Path | None) -> dict[str, str]:
-    """Read the few smoke settings from a Compose-style env file.
-
-    This deliberately is not a general dotenv implementation. It accepts the
-    ordinary unquoted and single/double-quoted values used by this repository,
-    while process environment variables remain authoritative.
-    """
-    if path is None or not path.exists():
-        return {}
-
-    values: dict[str, str] = {}
-    wanted = {"BASE_URL", "OMNIFLOW_PORT"}
-    for raw_line in path.read_text(encoding="utf-8-sig").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].lstrip()
-        if "=" not in line:
-            continue
-        key, raw_value = line.split("=", 1)
-        key = key.strip()
-        if key not in wanted:
-            continue
-
-        value = raw_value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
-            value = value[1:-1]
-        else:
-            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
-        values[key] = value
-    return values
-
-
 def resolve_runtime_config(
     *,
     base_url: str | None,
-    env_file: Path | None,
     environ: Mapping[str, str] | None = None,
 ) -> RuntimeConfig:
     environment = os.environ if environ is None else environ
-    file_values = _read_env_file(env_file)
 
     selected_base_url = (
         base_url
         or environment.get("BASE_URL")
-        or file_values.get("BASE_URL")
     )
     if not selected_base_url:
         port_text = (
             environment.get("OMNIFLOW_PORT")
             if "OMNIFLOW_PORT" in environment
-            else file_values.get("OMNIFLOW_PORT", str(DEFAULT_PORT))
+            else str(DEFAULT_PORT)
         ) or str(DEFAULT_PORT)
         try:
             port = int(port_text)
@@ -316,15 +276,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--base-url",
         help=(
-            "public Omniflow origin; defaults to BASE_URL, then OMNIFLOW_PORT "
-            "from the process/.env, then http://127.0.0.1:3001"
+            "public Omniflow origin; defaults to BASE_URL, then OMNIFLOW_PORT, "
+            "then http://127.0.0.1:3001"
         ),
-    )
-    parser.add_argument(
-        "--env-file",
-        type=Path,
-        default=ROOT / ".env",
-        help="Compose env file used for port selection (default: %(default)s)",
     )
     parser.add_argument(
         "--timeout",
@@ -345,7 +299,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = resolve_runtime_config(
             base_url=args.base_url,
-            env_file=args.env_file,
         )
         client = SmokeClient(
             config.base_url,

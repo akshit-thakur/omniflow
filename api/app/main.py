@@ -7,7 +7,7 @@ import asyncpg
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from .db import close_pool, open_pool, ready
+from .db import close_pool, open_pool, ready, activity_source, connection
 from .auth import router as auth_router, require_operator
 from .routers import ai, backups, gym, kitchen, media, medications, tasks
 
@@ -43,6 +43,7 @@ async def operator_boundary(request: Request, call_next):
     public = {
         ("GET", "/"), ("GET", "/health"), ("GET", "/live"),
         ("POST", "/api/auth/login"),
+        ("GET", "/api/auth/status"), ("POST", "/api/auth/setup"),
         ("POST", "/api/internal/ai/proposals"),
     }
     if (request.method, request.url.path) not in public:
@@ -50,7 +51,13 @@ async def operator_boundary(request: Request, call_next):
             require_operator(request)
         except HTTPException as exc:
             return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-    return await call_next(request)
+    path = request.url.path
+    source = "ai" if path.startswith('/api/ai/') else "restore" if path.startswith('/api/backups/') and path.endswith('/restore') else "manual"
+    token = activity_source.set(source)
+    try:
+        return await call_next(request)
+    finally:
+        activity_source.reset(token)
 
 
 @app.middleware("http")
@@ -120,5 +127,35 @@ async def live():
 
 
 app.include_router(auth_router, prefix="/api")
+
+
+@app.get("/api/activity")
+async def recent_activity(limit: int = 100, before: str | None = None, before_id: str = ""):
+    from datetime import datetime
+    if not 1 <= limit <= 200:
+        raise HTTPException(422, "Limit must be between 1 and 200")
+    try:
+        cursor = datetime.fromisoformat(before) if before else None
+        if cursor is not None and cursor.tzinfo is None:
+            raise ValueError()
+    except ValueError:
+        raise HTTPException(422, "Invalid activity cursor")
+    async with connection() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM (
+              SELECT 'change-' || id AS id, created_at, 'Operator' AS actor,
+                     source, action, entity_table, entity_id, label
+              FROM activity_events
+              UNION ALL
+              SELECT 'ai-' || id, created_at, 'Operator', 'ai', action,
+                     entity_table, entity_id,
+                     COALESCE(after_state->>'title', after_state->>'name', before_state->>'title', before_state->>'name', entity_id)
+              FROM ai_mutation_audit WHERE status = 'committed'
+            ) events
+            WHERE created_at >= now() - interval '7 days'
+              AND ($2::timestamptz IS NULL OR (created_at, id) < ($2, $3))
+            ORDER BY created_at DESC, id DESC LIMIT $1
+        """, limit, cursor, before_id)
+    return [dict(row) for row in rows]
 for module in (tasks, kitchen, medications, gym, media, backups, ai):
     app.include_router(module.router, prefix="/api")

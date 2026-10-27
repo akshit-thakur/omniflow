@@ -52,7 +52,7 @@ class SchemaBootstrapTests(unittest.TestCase):
         with patch.dict(sys.modules, {"sqlalchemy": sqlalchemy}):
             cls.runner = _load_module(
                 "omniflow_migration_runner",
-                ROOT / "scripts" / "run_migrations.py",
+            ROOT / "scripts" / "startup" / "run_migrations.py",
             )
 
     def _target(self, *, name="omniflow", user="configured"):
@@ -161,7 +161,7 @@ class SchemaBootstrapTests(unittest.TestCase):
     def test_api_requires_the_current_revision(self):
         source = (ROOT / "api" / "app" / "db.py").read_text(encoding="utf-8")
         self.assertIn(
-            'EXPECTED_ALEMBIC_REVISION = "010_finite_numeric_constraints"',
+            'EXPECTED_ALEMBIC_REVISION = "011_recent_activity"',
             source,
         )
 
@@ -411,7 +411,7 @@ class SchemaBootstrapTests(unittest.TestCase):
         self.assertIn("CREATE DATABASE", execute.call_args_list[1].args[1])
         admin_engine.dispose.assert_called_once_with()
 
-    def test_existing_role_database_creation_precedes_password_rotation(self):
+    def test_existing_role_database_creation_preserves_password(self):
         target = self._target(name="newdb")
         admin_engine = MagicMock()
         inspect_connection = MagicMock()
@@ -446,9 +446,8 @@ class SchemaBootstrapTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual(2, execute.call_count)
+        self.assertEqual(1, execute.call_count)
         self.assertIn("CREATE DATABASE", execute.call_args_list[0].args[1])
-        self.assertIn("ALTER ROLE", execute.call_args_list[1].args[1])
         admin_engine.dispose.assert_called_once_with()
 
 
@@ -461,12 +460,12 @@ class ConstraintDiagnosticTests(unittest.TestCase):
         with patch.dict(sys.modules, {"sqlalchemy": sqlalchemy}):
             runner = _load_module(
                 "omniflow_migration_runner_for_constraints",
-                ROOT / "scripts" / "run_migrations.py",
+                ROOT / "scripts" / "startup" / "run_migrations.py",
             )
-            with patch.dict(sys.modules, {"run_migrations": runner}):
+            with patch.dict(sys.modules, {"scripts.startup.run_migrations": runner}):
                 cls.checker = _load_module(
                     "omniflow_check_constraints",
-                    ROOT / "scripts" / "check_constraints.py",
+                    ROOT / "docker" / "tests" / "check_constraints.py",
                 )
 
     def _engine_returning(self, *query_results):

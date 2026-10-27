@@ -27,19 +27,56 @@ x-ai-environment: &ai-environment
   AI_SERVICE_SECRET_FILE: /run/omniflow-ai/ai_service_secret
 
 services:
+  tests:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: docker/tests/Dockerfile
+    environment:
+      DATABASE_PASSWORD: test-db-password-123456789
+      AI_SERVICE_SECRET: test-service-secret-123456789012345678901234567890
+
+  smoke-test:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: docker/tests/Dockerfile
+    environment:
+      BASE_URL: http://frontend
+      SMOKE_OPERATOR_PASSWORD: ${SMOKE_OPERATOR_PASSWORD:-}
+    command: ["python", "-m", "docker.tests.smoke"]
+
+  migration-tests:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: docker/tests/Dockerfile
+    environment:
+      <<: *api-environment
+      DATABASE_USER: ${DATABASE_ADMIN_USER:-omniflow_admin}
+      DATABASE_PASSWORD_FILE: /run/omniflow-admin/admin_password
+      RUN_DB_TESTS: "1"
+    volumes:
+      - admin-secrets:/run/omniflow-admin:ro
+      - api-secrets:/run/omniflow-api:ro
+    depends_on:
+      database-init:
+        condition: service_completed_successfully
+    command: ["python", "-m", "unittest", "tests.test_migrations.SchemaConstraintIntegrationTests", "-v"]
+
   secrets-init:
-    image: alpine:3.21
+    build:
+      context: .
+      dockerfile: docker/startup/secrets.Dockerfile
     environment:
       ADMIN_PASSWORD_INPUT: ${POSTGRES_PASSWORD:-}
       API_PASSWORD_INPUT: ${DATABASE_RUNTIME_PASSWORD:-}
       AI_PASSWORD_INPUT: ${AI_RUNTIME_PASSWORD:-}
       AI_SERVICE_SECRET_INPUT: ${AI_SERVICE_SECRET:-}
-      OPERATOR_PASSWORD_INPUT: ${OPERATOR_PASSWORD:-}
     volumes:
       - admin-secrets:/run/omniflow-admin
       - api-secrets:/run/omniflow-api
       - ai-secrets:/run/omniflow-ai
-      - ./scripts/init_secrets.sh:/opt/omniflow/init_secrets.sh:ro
     entrypoint: ["/bin/sh", "/opt/omniflow/init_secrets.sh"]
     restart: "no"
 
@@ -106,7 +143,7 @@ services:
     profiles: ["tools"]
     build:
       context: .
-      dockerfile: migrator/Dockerfile
+      dockerfile: docker/tests/Dockerfile
     environment:
       DATABASE_HOST: database
       DATABASE_PORT: "5432"
@@ -118,13 +155,14 @@ services:
     depends_on:
       database-init:
         condition: service_completed_successfully
-    command: ["python", "scripts/check_constraints.py"]
+    command: ["python", "-m", "docker.tests.check_constraints"]
     restart: "no"
 
   database-tests:
     profiles: ["tools"]
     build:
-      context: ./api
+      context: .
+      dockerfile: docker/tests/Dockerfile
     environment:
       <<: *api-environment
       RUN_DB_TESTS: "1"
@@ -133,10 +171,6 @@ services:
       - admin-secrets:/run/omniflow-admin:ro
       - api-secrets:/run/omniflow-api:ro
       - ai-secrets:/run/omniflow-ai:ro
-      - ./api:/workspace/api:ro
-      - ./ai:/workspace/ai:ro
-      - ./alembic:/workspace/alembic:ro
-      - ./tests:/workspace/tests:ro
     depends_on:
       database-init:
         condition: service_completed_successfully
@@ -147,24 +181,21 @@ services:
       - tests.test_ai_actions.AIActionIntegrationTests
       - tests.test_backups.BackupIntegrationTests
       - tests.test_public_routes.PublicMutationIntegrationTests
-      - tests.test_migrations.SchemaConstraintIntegrationTests
       - tests.test_ai_classifier.RetrievalIntegrationTests
+      - tests.test_activity.ActivityIntegrationTests
       - -v
     restart: "no"
 
   showcase-seed:
     profiles: ["tools"]
-    # Reuse the API runtime that the normal Compose build already produces;
-    # the seeder itself is stdlib-only and mounted read-only below.
-    image: omniflow-api:latest
+    build:
+      context: .
+      dockerfile: docker/demo/Dockerfile
     environment:
       SHOWCASE_BASE_URL: http://api:8000/api
-    volumes:
-      - ./scripts/seed_showcase.py:/opt/omniflow/seed_showcase.py:ro
     depends_on:
       api:
         condition: service_healthy
-    command: ["python", "/opt/omniflow/seed_showcase.py"]
     restart: "no"
 
   model:
@@ -182,34 +213,36 @@ services:
     restart: unless-stopped
 
   model-init:
-    image: ollama/ollama:0.32.4
+    build:
+      context: .
+      dockerfile: docker/startup/models.Dockerfile
     environment:
       OLLAMA_HOST: http://model:11434
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-bge-m3}
-      OLLAMA_REASONER_MODEL: ${OLLAMA_REASONER_MODEL:-qwen3:8b}
+      OLLAMA_REASONER_MODEL: ${OLLAMA_REASONER_MODEL:-qwen3:4b}
       MODEL_PULL_ATTEMPTS: ${MODEL_PULL_ATTEMPTS:-5}
       MODEL_PULL_TIMEOUT_SECONDS: ${MODEL_PULL_TIMEOUT_SECONDS:-3600}
     depends_on:
       model:
         condition: service_healthy
-    volumes:
-      - ./scripts/init_models.sh:/opt/omniflow/init_models.sh:ro
     entrypoint: ["/bin/sh", "/opt/omniflow/init_models.sh"]
     restart: "on-failure:3"
 
   api:
     build:
-      context: ./api
+      context: .
+      dockerfile: docker/python-services.Dockerfile
+      target: api-runtime
     environment:
       <<: *api-environment
       AI_SERVICE_URL: http://ai:8090
       DB_POOL_MIN_SIZE: ${DB_POOL_MIN_SIZE:-2}
       DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-10}
       DB_COMMAND_TIMEOUT: ${DB_COMMAND_TIMEOUT:-30}
-      OMNIFLOW_ALLOWED_HOSTS: ${OMNIFLOW_ALLOWED_HOSTS:-localhost,127.0.0.1,testserver,api}
+      OMNIFLOW_ALLOWED_HOSTS: ${OMNIFLOW_ALLOWED_HOSTS:-localhost,127.0.0.1,testserver,api,frontend}
       OMNIFLOW_SESSION_COOKIE_SECURE: ${OMNIFLOW_SESSION_COOKIE_SECURE:-false}
     volumes:
-      - api-secrets:/run/omniflow-api:ro
+      - api-secrets:/run/omniflow-api
     depends_on:
       database-init:
         condition: service_completed_successfully
@@ -226,13 +259,15 @@ services:
 
   ai:
     build:
-      context: ./ai
+      context: .
+      dockerfile: docker/python-services.Dockerfile
+      target: ai-runtime
     environment:
       <<: *ai-environment
       API_INTERNAL_URL: http://api:8000
       OLLAMA_URL: http://model:11434
       OLLAMA_EMBED_MODEL: ${OLLAMA_EMBED_MODEL:-bge-m3}
-      OLLAMA_REASONER_MODEL: ${OLLAMA_REASONER_MODEL:-qwen3:8b}
+      OLLAMA_REASONER_MODEL: ${OLLAMA_REASONER_MODEL:-qwen3:4b}
       INDEX_VERSION: ${INDEX_VERSION:-2}
       RETRIEVAL_LIMIT: ${RETRIEVAL_LIMIT:-8}
       MAX_SEMANTIC_DISTANCE: ${MAX_SEMANTIC_DISTANCE:-0.60}

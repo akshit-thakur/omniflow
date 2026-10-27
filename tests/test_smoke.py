@@ -1,12 +1,10 @@
 import contextlib
 import io
 import json
-from pathlib import Path
-import tempfile
 import unittest
 from urllib.parse import urlsplit
 
-from scripts import smoke
+from docker.tests import smoke
 
 
 class FakeResponse:
@@ -73,40 +71,9 @@ class RecordingOpener:
 
 
 class RuntimeConfigurationTests(unittest.TestCase):
-    def test_env_file_port_is_used_without_exporting_it(self):
-        with tempfile.TemporaryDirectory() as directory:
-            env_file = Path(directory) / ".env"
-            env_file.write_text(
-                "OMNIFLOW_PORT=4321\n",
-                encoding="utf-8",
-            )
-            config = smoke.resolve_runtime_config(
-                base_url=None,
-                env_file=env_file,
-                environ={},
-            )
-
-        self.assertEqual("http://127.0.0.1:4321", config.base_url)
-
-    def test_explicit_base_url_overrides_env_file(self):
-        with tempfile.TemporaryDirectory() as directory:
-            env_file = Path(directory) / ".env"
-            env_file.write_text(
-                "BASE_URL=http://env-file:3001\n",
-                encoding="utf-8",
-            )
-            config = smoke.resolve_runtime_config(
-                base_url="https://example.test/omniflow/",
-                env_file=env_file,
-                environ={},
-            )
-
-        self.assertEqual("https://example.test/omniflow", config.base_url)
-
     def test_process_base_url_takes_precedence_over_configured_port(self):
         config = smoke.resolve_runtime_config(
             base_url=None,
-            env_file=None,
             environ={
                 "BASE_URL": "http://remote.example:9876/",
                 "OMNIFLOW_PORT": "4321",
@@ -118,7 +85,6 @@ class RuntimeConfigurationTests(unittest.TestCase):
     def test_empty_port_uses_compose_default(self):
         config = smoke.resolve_runtime_config(
             base_url=None,
-            env_file=None,
             environ={"OMNIFLOW_PORT": ""},
         )
 
@@ -128,7 +94,6 @@ class RuntimeConfigurationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "OMNIFLOW_PORT"):
             smoke.resolve_runtime_config(
                 base_url=None,
-                env_file=None,
                 environ={"OMNIFLOW_PORT": "not-a-port"},
             )
 

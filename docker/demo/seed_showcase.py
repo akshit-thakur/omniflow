@@ -69,7 +69,8 @@ class ApiClient:
         headers = {
             **self.headers,
             **({"Authorization": f"Bearer {self.cookies['__bearer__']}"} if "__bearer__" in self.cookies else {}),
-            **({"Origin": "http://api:8000", "X-CSRF-Token": self.cookies["__csrf__"]} if method in {"POST", "PUT", "PATCH", "DELETE"} and "__csrf__" in self.cookies else {}),
+            **({"Origin": "http://api:8000"} if method in {"POST", "PUT", "PATCH", "DELETE"} else {}),
+            **({"X-CSRF-Token": self.cookies["__csrf__"]} if "__csrf__" in self.cookies else {}),
             **({"Content-Type": "application/json"} if payload is not None else {}),
         }
         request = Request(
@@ -463,12 +464,6 @@ def main() -> int:
     base_url = os.environ.get("SHOWCASE_BASE_URL", "http://api:8000/api")
     try:
         client = ApiClient(base_url)
-        operator_path = os.environ.get("OPERATOR_PASSWORD_FILE")
-        if not operator_path:
-            raise ShowcaseError("OPERATOR_PASSWORD_FILE is required")
-        with open(operator_path, encoding="utf-8") as secret_file:
-            operator_password = secret_file.read().strip()
-        client.login(operator_password)
         before = inspect_showcase(client)
         result = seed_showcase(client)
         ai_url = os.environ.get("SHOWCASE_AI_URL")

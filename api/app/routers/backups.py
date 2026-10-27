@@ -352,6 +352,11 @@ async def restore_backup(request: Request):
                     "SET status = 'rejected', decided_at = NOW() "
                     "WHERE status = 'pending'"
                 )
+            await conn.execute(
+                "INSERT INTO activity_events(source, action, entity_table, entity_id, label) "
+                "VALUES ('restore', 'restore', 'backups', $1, $2)",
+                module, f"Restored {module} backup",
+            )
             for table_name in insert_order:
                 if "id" in TABLE_COLUMNS[table_name]:
                     await conn.execute(

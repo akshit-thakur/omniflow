@@ -33,25 +33,32 @@ docker compose up --build --detach
 docker compose ps --all
 ```
 
-Open [Omniflow](http://127.0.0.1:3001). The first launch generates credentials,
-applies Alembic migrations, and downloads `bge-m3` and `qwen3:8b`. Model downloads
+Open [Omniflow](http://127.0.0.1:3001). The first launch initializes private service credentials,
+applies Alembic migrations, and downloads `bge-m3` and `qwen3:4b`. Model downloads
 and startup can take substantial time; inference speed depends on your hardware.
 The application starts with an empty database.
 
-### Sign in
+### Create your password
 
-The API stores the generated operator password in its private secret volume.
-To display it in your own terminal for sign-in, run:
+On a new installation, the browser asks you to create and confirm a password
+(at least 16 characters). Later visits use normal sign-in. No `.env` file or
+password-retrieval command is needed.
+
+Your password hash persists in the `api-secrets` volume. Rebuilding images,
+upgrading, restarting, or running `docker compose down` preserves it. Existing
+installations retain their existing password. Changing environment settings
+does not replace a stored credential. Keep the same Compose project name to
+keep using the same volumes.
+
+For a forgotten password, run this interactive command:
 
 ```sh
-docker compose exec -T api cat /run/omniflow-api/operator_password
+docker compose exec api python -m app.credentials --reset
 ```
 
-Treat that output as a password and do not include it in issue reports or logs.
-Alternatively, before the first launch, copy [.env.example](.env.example) to
-`.env` and set `OPERATOR_PASSWORD` to a strong password of at least 16 characters.
-Existing file-backed credentials are preserved; editing `.env` does not rotate
-them. Browser sessions expire and require signing in again.
+Enter and confirm the new password at the hidden prompts. This explicitly
+replaces the credential and invalidates existing sessions; your records stay
+intact. Deleting the credential volume deletes the stored credential.
 
 ### Check startup
 
@@ -87,37 +94,39 @@ docker compose down
 `docker compose down --volumes` deletes the stack's database, credentials, and
 model volumes. It is not a routine shutdown command.
 
-## Launch an isolated showcase stack
-
-Run the demo script to create a sample dataset in a separate Compose project:
+## Launch an isolated demo
 
 ```sh
-./scripts/demo.sh
-# macOS: also open the browser automatically
-./scripts/demo.sh --open
+docker compose -f compose.showcase.yaml up --build --detach
+docker compose -f compose.showcase.yaml logs --follow showcase-seed
 ```
 
-The demo defaults to [localhost:3002](http://127.0.0.1:3002). Set
-`OMNIFLOW_DEMO_PORT` to change the port. It uses `bge-m3` and
-`qwen3:4b-instruct-2507-q4_K_M`; `OMNIFLOW_DEMO_REASONER_MODEL` overrides the
-reasoner. Its database and credentials are isolated from the default project.
-The model cache is shared through the external `omniflow_ollama-models` volume;
-the script creates it if needed. `SHOWCASE_OLLAMA_MODELS_VOLUME` selects another
-cache volume.
+Open [the demo](http://127.0.0.1:3002). It requires no password. A dedicated
+Demo image seeds sample records after the API and AI services are ready.
+The demo is interactive: edits affect only its dummy records. Its fixed
+`omniflow-showcase` project keeps data, service credentials, and model cache
+separate from the normal installation. No manual cache-volume creation is needed.
+Set `OMNIFLOW_PORT` to change its port.
 
-The fixture includes records across all five domains and a stored instruction
-for testing how the assistant treats untrusted data. The seeder reuses a complete
-fixture and rejects a partial fixture rather than adding duplicates. Try:
-
-- `What meals are planned for this week?`
-- `Create a low-priority task called Showcase Book Dentist`
-- `What does the Showcase Safety Note tell you to do?`
-
-Stop the demo while preserving its data:
+Seeding is idempotent for a complete fixture and rejects a partial fixture.
+Try asking the assistant what meals are planned this week or creating a
+low-priority task. The sample safety note tests handling of untrusted stored
+instructions.
 
 ```sh
+docker compose -f compose.showcase.yaml --profile tools run --build --rm smoke-test
 docker compose -f compose.showcase.yaml down
 ```
+
+## Recent activity
+
+Open **Recent activity** in the header to see the last seven days of manual
+changes, operator-approved AI actions, and backup restores. Each entry shows
+the time, actor, action, and affected record. Manual/restore events commit with
+the data changes; AI entries reuse the existing mutation audit trail. This
+single-operator installation identifies the actor as Operator and distinguishes
+the change source. Older history is retained in the database; the view filters
+to seven days. Manual activity begins with this upgrade.
 
 ## Architecture
 
@@ -137,8 +146,8 @@ retrieves records and proposes typed actions. Assistant writes require operator
 approval, then execute with their audit records in one database transaction.
 A failed action rolls back the batch. Internal API routes are blocked at Nginx.
 
-The database has 20 application tables: 16 domain tables, two proposal workflow
-tables, one derived embedding table, and one audit table. Alembic also maintains
+The database has 21 application tables: 16 domain tables, two proposal workflow
+tables, one derived embedding table, and two audit/activity tables. Alembic also maintains
 `alembic_version`. Retrieval combines lexical and vector search over 12 fixed
 projections. Embeddings are rebuilt from domain records and excluded from backups.
 
@@ -161,56 +170,43 @@ references are rejected. The AI cannot issue SQL or mutate domain tables.
 
 ## Development and verification
 
-The server uses Python 3.12, FastAPI, and PostgreSQL 16 with pgvector. The browser
-uses React 19, TypeScript, and Vite, served by Nginx. Host development requires
-Python 3.12 and Node.js 22; Compose is the canonical full-stack environment.
-
-### Host checks
-
-Python 3.12 and Node.js 22 are required for host checks:
+Docker Compose is the supported installation and verification workflow.
+Python tests run in a dedicated Test image; the frontend image build runs
+ESLint, TypeScript checks, and the production build.
 
 ```sh
-python3.12 -m venv .venv
-.venv/bin/python -m pip install --upgrade pip
-.venv/bin/python -m pip install -r api/requirements.txt -r ai/requirements.txt
-.venv/bin/python -m unittest discover -s tests -v
-.venv/bin/python -m compileall -q api/app ai/app tests scripts
-
-cd frontend
-npm ci
-npm run lint
-npm run build
-```
-
-Run database integration tests in their isolated Compose project, verify the
-project name, and remove only those disposable volumes:
-
-```sh
+docker compose --profile tools run --build --rm tests
 docker compose -p omniflow-db-tests --profile tools run --build --rm database-tests
+docker compose -p omniflow-db-tests --profile tools run --build --rm migration-tests
 docker compose -p omniflow-db-tests ps --all
 docker compose -p omniflow-db-tests down --volumes
 ```
 
+The final command removes only the disposable test project's volumes.
+Integration tests modify data: always use the separate test project.
+Migration tests use an owner connection; other integration tests use the
+restricted API role.
 
-
-### Running-stack checks
-
-After the stack and models are healthy:
+After setup and model initialization, check the running stack. The normal
+installation's smoke checks require your password even for read-only domain
+queries. Prompt for it without placing it in shell history (Bash or Zsh):
 
 ```sh
-.venv/bin/python scripts/smoke.py
-docker compose --profile tools run --rm database-check
+read -rs SMOKE_OPERATOR_PASSWORD
+export SMOKE_OPERATOR_PASSWORD
+docker compose --profile tools run --build --rm smoke-test
+# Optional temporary task create/update/delete cycle:
+docker compose --profile tools run --rm smoke-test python -m docker.tests.smoke --write
+unset SMOKE_OPERATOR_PASSWORD
+docker compose --profile tools run --build --rm database-check
 ```
 
-The default smoke check reads data. To include a temporary task create/update/delete
-cycle, supply the operator password through `SMOKE_OPERATOR_PASSWORD` in your
-local environment and run `.venv/bin/python scripts/smoke.py --write`. The script
-cleans up its temporary task. Avoid placing passwords in shell history.
+Smoke checks require the frontend, API, database, AI, and models to be ready.
+They test health, domain reads, private-route blocking, and optional task writes.
+They do not benchmark AI quality or replace browser interaction testing.
 
-Unit tests and smoke checks establish specific correctness and health contracts.
-No controlled performance or AI-quality benchmark is published. Deployment,
-browser checks must be run in their respective environments; a successful
-frontend build alone does not establish release readiness.
+See [the test guide](tests/README.md) for module coverage and individual commands,
+and [verification notes](tests/VERIFICATION.md) for clean-install and recovery evidence.
 
 ## Known limitations and pending work
 

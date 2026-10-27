@@ -6,7 +6,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "seed_showcase",
-    ROOT / "scripts" / "seed_showcase.py",
+    ROOT / "docker" / "demo" / "seed_showcase.py",
 )
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("Could not load showcase seed module")

@@ -11,7 +11,6 @@ RUN pip install --no-cache-dir --requirement requirements.txt
 COPY alembic.ini .
 COPY alembic ./alembic
 COPY database ./database
-COPY scripts/run_migrations.py ./scripts/run_migrations.py
-COPY scripts/check_constraints.py ./scripts/check_constraints.py
+COPY scripts/startup/run_migrations.py ./scripts/startup/run_migrations.py
 
-CMD ["python", "scripts/run_migrations.py"]
+CMD ["python", "-m", "scripts.startup.run_migrations"]

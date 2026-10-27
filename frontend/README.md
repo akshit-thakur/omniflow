@@ -31,9 +31,7 @@ only direct `lucide-react` import and acts as the semantic icon registry.
 
 Production is a Vite build served by Nginx. Nginx serves immutable hashed assets,
 uses SPA fallback for browser routes, proxies `/api/` to `api:8000`, and returns
-404 for `/api/internal/`. The local Vite server listens on `0.0.0.0:3001` and
-proxies public `/api` routes to a host API on `localhost:8001` while also
-returning 404 for `/api/internal/`.
+404 for `/api/internal/`. Compose is the supported runtime and verification environment.
 
 ## State and consistency
 
@@ -75,21 +73,11 @@ edge and public JSON routes, not interactive browser behavior.
 
 ## Quickstart and verification
 
-Use Node.js 22 with npm:
+From the repository root, build the frontend image. Its build runs ESLint,
+TypeScript checks, and Vite:
 
 ```sh
-cd frontend
-npm ci
-npm run lint
-npm run build
-```
-
-For local UI development, first run the API on host port 8001, then:
-
-```sh
-cd frontend
-npm ci
-npm run dev
+docker compose build frontend
 ```
 
 For the canonical full system, run from the repository root:

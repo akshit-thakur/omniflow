@@ -1,12 +1,14 @@
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
+from contextvars import ContextVar
 
 import asyncpg
 
 from .settings import get_settings
 
 _pool: asyncpg.Pool | None = None
-EXPECTED_ALEMBIC_REVISION = "010_finite_numeric_constraints"
+EXPECTED_ALEMBIC_REVISION = "011_recent_activity"
+activity_source = ContextVar("activity_source", default="manual")
 
 
 async def open_pool() -> None:
@@ -46,7 +48,11 @@ async def connection() -> AsyncIterator[asyncpg.Connection]:
     if _pool is None:
         raise RuntimeError("Database pool is not initialized")
     async with _pool.acquire() as conn:
-        yield conn
+        await conn.execute("SELECT set_config('omniflow.source', $1, false)", activity_source.get())
+        try:
+            yield conn
+        finally:
+            await conn.execute("RESET omniflow.source")
 
 
 async def ready() -> bool:

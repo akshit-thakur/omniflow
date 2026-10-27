@@ -164,7 +164,13 @@ export const tables: TableDefinition[] = [
     name: 'ai_mutation_audit', group: 'AI & audit', purpose: 'Ordered, transactional audit trail for AI action batches.',
     columns: [{ name: 'id', type: 'bigserial', flags: ['PK'] }, { name: 'request_id', type: 'uuid' }, { name: 'action_index', type: 'integer' }, { name: 'action', type: 'text' }, { name: 'entity_table', type: 'text' }, { name: 'entity_id', type: 'text', flags: ['NULL'] }, { name: 'arguments', type: 'jsonb' }, { name: 'before_state', type: 'jsonb', flags: ['NULL'] }, { name: 'after_state', type: 'jsonb', flags: ['NULL'] }, { name: 'status', type: 'text' }, { name: 'error', type: 'text', flags: ['NULL'] }, { name: 'created_at', type: 'timestamptz', flags: ['IDX'] }],
     indexes: ['uq_ai_mutation_audit_request_action (request_id, action_index)', 'idx_ai_mutation_audit_created (created_at DESC)'],
-    usage: { writes: ['API approved-action transaction'], reads: ['audit tests and operational inspection'], routes: ['/api/ai/proposals/{request_id}/approve'], consumers: ['No standalone browser view'], lifecycle: 'Audit insertion and request commit are part of the same transaction as every approved AI mutation.' },
+    usage: { writes: ['API approved-action transaction'], reads: ['Recent activity and audit tests'], routes: ['/api/ai/proposals/{request_id}/approve', '/api/activity'], consumers: ['Recent activity'], lifecycle: 'Audit insertion and request commit are part of the same transaction as every approved AI mutation.' },
+  },
+  {
+    name: 'activity_events', group: 'AI & audit', purpose: 'Transactional manual-change and backup-restore history.',
+    columns: [{ name: 'id', type: 'bigserial', flags: ['PK'] }, { name: 'created_at', type: 'timestamptz', flags: ['IDX'] }, { name: 'source', type: 'text' }, { name: 'action', type: 'text' }, { name: 'entity_table', type: 'text' }, { name: 'entity_id', type: 'text', flags: ['NULL'] }, { name: 'label', type: 'text', flags: ['NULL'] }],
+    indexes: ['activity_events_time (created_at DESC)'],
+    usage: { writes: ['Domain change triggers and backup restore'], reads: ['Recent activity'], routes: ['/api/activity'], consumers: ['Recent activity'], lifecycle: 'Commits with domain changes; the browser shows seven days. Retained across module restores.' },
   },
 ]
 

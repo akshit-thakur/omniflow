@@ -14,10 +14,11 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 
-from .settings import get_settings
+from .credentials import demo_mode, fingerprint, read_credential, set_password, verify
 
 SESSION_TTL_SECONDS = 8 * 60 * 60
 _sessions: dict[str, tuple[bytes, float]] = {}
+_session_credentials: dict[str, bytes] = {}
 MAX_SESSIONS = 1024
 LOGIN_WINDOW_SECONDS = 60
 MAX_LOGIN_FAILURES = 10
@@ -35,7 +36,7 @@ def _valid_host(request: Request) -> bool:
     allowed = {
         item.strip().lower()
         for item in __import__("os").getenv(
-            "OMNIFLOW_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver,api"
+            "OMNIFLOW_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver,api,frontend"
         ).split(",")
         if item.strip()
     }
@@ -49,7 +50,7 @@ def _same_origin(request: Request) -> bool:
     parsed = urlsplit(origin)
     allowed = {
         item.strip().lower()
-        for item in __import__("os").getenv("OMNIFLOW_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver,api").split(",")
+        for item in __import__("os").getenv("OMNIFLOW_ALLOWED_HOSTS", "localhost,127.0.0.1,testserver,api,frontend").split(",")
         if item.strip()
     }
     if parsed.scheme not in {"http", "https"} or parsed.hostname not in allowed:
@@ -69,8 +70,9 @@ def _session(request: Request) -> tuple[str, bytes] | None:
     if not item:
         return None
     csrf, expires = item
-    if expires <= time.time():
+    if expires <= time.time() or _session_credentials.get(token) != fingerprint():
         _sessions.pop(token or "", None)
+        _session_credentials.pop(token or "", None)
         return None
     return token, csrf
 
@@ -78,6 +80,10 @@ def _session(request: Request) -> tuple[str, bytes] | None:
 def require_operator(request: Request) -> tuple[str, bytes]:
     if not _valid_host(request):
         raise HTTPException(400, "Unrecognized Host")
+    if demo_mode():
+        if request.method in {"POST", "PUT", "PATCH", "DELETE"} and not _same_origin(request):
+            raise HTTPException(403, "Invalid demo request origin")
+        return "demo", b""
     session = _session(request)
     if not session:
         raise HTTPException(401, "Operator authentication required")
@@ -97,9 +103,8 @@ async def login(body: LoginRequest, request: Request, response: Response):
     failures = [stamp for stamp in _login_failures.get(client, []) if stamp > now - LOGIN_WINDOW_SECONDS]
     if len(failures) >= MAX_LOGIN_FAILURES:
         raise HTTPException(429, "Too many login attempts")
-    expected = get_settings().operator_password.encode("utf-8")
-    supplied = body.password.encode("utf-8")
-    if not hmac.compare_digest(supplied, expected):
+    credential = read_credential()
+    if not verify(body.password, credential):
         failures.append(now)
         _login_failures[client] = failures
         raise HTTPException(401, "Invalid operator credential")
@@ -107,14 +112,36 @@ async def login(body: LoginRequest, request: Request, response: Response):
     for token, (_, expires) in list(_sessions.items()):
         if expires <= now:
             _sessions.pop(token, None)
+            _session_credentials.pop(token, None)
     if len(_sessions) >= MAX_SESSIONS:
         raise HTTPException(503, "Operator session capacity reached")
     token = secrets.token_urlsafe(32)
     csrf = secrets.token_bytes(32)
     _sessions[token] = (csrf, time.time() + SESSION_TTL_SECONDS)
+    _session_credentials[token] = fingerprint(credential)
     # A bearer token is intentionally returned to the same-origin SPA. Cookies
     # are not used: HTTP cookies are scoped by host/path, never by TCP port.
     return {"authenticated": True, "access_token": token, "csrf_token": csrf.hex()}
+
+
+@router.get("/status")
+async def status():
+    return {"setup_required": not demo_mode() and not bool(read_credential()), "demo": demo_mode()}
+
+
+@router.post("/setup")
+async def setup(body: LoginRequest, request: Request, response: Response):
+    if not _valid_host(request) or not _same_origin(request):
+        raise HTTPException(403, "Setup requires a same-origin request")
+    if demo_mode():
+        raise HTTPException(409, "Demo does not require setup")
+    try:
+        set_password(body.password)
+    except FileExistsError:
+        raise HTTPException(409, "Operator is already configured")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return await login(body, request, response)
 
 
 @router.get("/session")
@@ -127,4 +154,5 @@ async def session(request: Request):
 async def logout(request: Request, response: Response):
     token, _ = require_operator(request)
     _sessions.pop(token, None)
+    _session_credentials.pop(token, None)
     return {"authenticated": False}

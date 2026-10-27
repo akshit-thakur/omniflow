@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 import math
 import os
+from .credentials import read_credential
 
 
 def _secret_value(
@@ -114,9 +115,7 @@ def get_settings() -> Settings:
             "AI_SERVICE_SECRET_FILE",
             None,
         ),
-        operator_password=_secret_value(
-            "OPERATOR_PASSWORD", "OPERATOR_PASSWORD_FILE", None
-        ),
+        operator_password=read_credential(),
         allowed_hosts=tuple(
             item.strip().lower()
             for item in os.getenv(
